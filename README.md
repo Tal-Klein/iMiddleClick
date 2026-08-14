@@ -8,6 +8,16 @@
   Middle-click gestures for MacBook trackpads and Magic Mouse.
 </h2>
 
+<table>
+  <tr>
+    <td width="40%" align="center">
+      <img src="assets/app view.png" width="100%">
+    </td>
+    <td width="60%" align="center">
+      <img src="assets/demo.gif" width="100%">
+    </td>
+  </tr>
+</table>
 
 ## Features
 
@@ -37,13 +47,20 @@
 Download the latest version from the
 [Releases](../../releases/latest) page.
 
-### Installation
+## Installation & Permissions
 
-1. Download the latest `iMiddleClick-*.dmg`.
-2. Open the DMG.
-3. Drag **iMiddleClick** into **Applications**.
-4. Launch iMiddleClick.
-5. Grant the requested macOS permissions when prompted.
+1. Download the latest `.dmg` from the Releases page.
+2. Drag **iMiddleClick** into the **Applications** folder.
+3. Open **iMiddleClick** from Applications.
+4. macOS may block the app because it is not currently notarized. Click **Done**.
+5. Open **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to iMiddleClick.
+6. Launch iMiddleClick again and approve any permission requests from macOS.
+7. When macOS notifies you that iMiddleClick added a new background item, choose **Allow**.
+8. Enter your administrator password if macOS asks for it.
+
+If the helper is not running after setup, quit iMiddleClick and launch it again.
+
+Once setup is complete, iMiddleClick runs from the menu bar.
 
 ## Why iMiddleClick?
 
