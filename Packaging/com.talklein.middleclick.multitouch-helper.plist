@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.talklein.middleclick.multitouch-helper</string>
+    <key>MachServices</key>
+    <dict>
+        <key>com.talklein.middleclick.multitouch-helper</key>
+        <true/>
+    </dict>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/demo_middleClickForMac.app/Contents/Library/LaunchDaemons/mt_touch_helper</string>
+        <string>--all-devices</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
