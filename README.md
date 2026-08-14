@@ -1,6 +1,13 @@
-# iMiddleClick
+<p align="center">
+  <img src="demo_middleClickForMac/Assets.xcassets/AppIcon.appiconset/icon_256x256.png" width="128">
+</p>
 
-A lightweight native macOS utility that brings middle-click gestures to your MacBook trackpad and Magic Mouse.
+<p align="center">iMiddleClick</p>
+
+<h2 align="center">
+  Middle-click gestures for MacBook trackpads and Magic Mouse.
+</h2>
+
 
 ## Features
 
