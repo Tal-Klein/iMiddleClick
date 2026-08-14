@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,10 +85,15 @@ static int lastTotalFingerCount = -1;
 static pthread_mutex_t fingerMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static volatile sig_atomic_t isRunning = 1;
+static volatile sig_atomic_t resetRequested = 0;
 
+static MTDeviceCreateListFn gCreateList = NULL;
+static MTDeviceIsBuiltInFn gIsBuiltIn = NULL;
+static MTDeviceGetServiceFn gGetService = NULL;
 static MTRegisterContactFrameCallbackFn gRegisterCallback = NULL;
 static MTDeviceStartFn gStart = NULL;
 static MTDeviceStopFn gStop = NULL;
+static bool gTrackAllDevices = false;
 
 static bool containsCaseInsensitive(const char *text, const char *needle) {
     if (!text || !needle || !needle[0]) {
@@ -135,6 +141,27 @@ static void broadcastLine(const char *line) {
     }
 
     pthread_mutex_unlock(&clientMutex);
+}
+
+static void *clientCommandThreadMain(void *context) {
+    int clientSocket = (int)(intptr_t)context;
+    char buffer[128];
+
+    while (isRunning) {
+        ssize_t received = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+
+        if (received <= 0) {
+            return NULL;
+        }
+
+        buffer[received] = '\0';
+
+        if (strstr(buffer, "reset")) {
+            resetRequested = 1;
+        }
+    }
+
+    return NULL;
 }
 
 static void sendCurrentFingerCount(int clientSocket) {
@@ -215,6 +242,12 @@ static void *serverThreadMain(void *context) {
             clientSockets[clientCount++] = clientSocket;
             printf("client connected (%d active)\n", clientCount);
             sendCurrentFingerCount(clientSocket);
+
+            pthread_t clientThread;
+
+            if (pthread_create(&clientThread, NULL, clientCommandThreadMain, (void *)(intptr_t)clientSocket) == 0) {
+                pthread_detach(clientThread);
+            }
         } else {
             close(clientSocket);
         }
@@ -529,8 +562,58 @@ static bool addTrackedDevice(MTDeviceRef device, MTDeviceIsBuiltInFn isBuiltIn, 
     return true;
 }
 
+static void scanForDevices(void) {
+    if (!gCreateList || !gIsBuiltIn || !gGetService) {
+        return;
+    }
+
+    CFArrayRef devices = gCreateList();
+
+    if (!devices) {
+        return;
+    }
+
+    CFIndex count = CFArrayGetCount(devices);
+
+    for (CFIndex i = 0; i < count; i++) {
+        MTDeviceRef device = (MTDeviceRef)CFArrayGetValueAtIndex(devices, i);
+
+        if (!gTrackAllDevices && !gIsBuiltIn(device)) {
+            continue;
+        }
+
+        if (addTrackedDevice(device, gIsBuiltIn, gGetService)) {
+            startTrackedDeviceAtIndex(trackedDeviceCount - 1);
+        }
+    }
+
+    CFRelease(devices);
+}
+
+static void resetTrackedDevices(void) {
+    printf("Resetting multitouch devices\n");
+
+    pthread_mutex_lock(&fingerMutex);
+
+    for (int i = 0; i < trackedDeviceCount; i++) {
+        if (gStop && trackedDevices[i].startStatus == 0) {
+            gStop(trackedDevices[i].device);
+        }
+    }
+
+    trackedDeviceCount = 0;
+    lastTotalFingerCount = -1;
+
+    pthread_mutex_unlock(&fingerMutex);
+
+    broadcastLine("fingerCount=0 timestamp=0\n");
+    scanForDevices();
+    fflush(stdout);
+}
+
 int main(int argc, char *argv[]) {
     bool trackAllDevices = argc > 1 && strcmp(argv[1], "--all-devices") == 0;
+    gTrackAllDevices = trackAllDevices;
 
     signal(SIGINT, handleSignal);
     signal(SIGTERM, handleSignal);
@@ -555,83 +638,33 @@ int main(int argc, char *argv[]) {
     MTRegisterContactFrameCallbackFn registerCallback = (MTRegisterContactFrameCallbackFn)loadSymbol(handle, "MTRegisterContactFrameCallback");
     MTDeviceStartFn start = (MTDeviceStartFn)loadSymbol(handle, "MTDeviceStart");
     MTDeviceStopFn stop = (MTDeviceStopFn)loadSymbol(handle, "MTDeviceStop");
+    gCreateList = createList;
+    gIsBuiltIn = isBuiltIn;
+    gGetService = getService;
     gRegisterCallback = registerCallback;
     gStart = start;
     gStop = stop;
 
-    CFArrayRef devices = createList();
-
-    if (!devices) {
-        fprintf(stderr, "MTDeviceCreateList returned NULL\n");
-        return 1;
-    }
-
-    CFIndex count = CFArrayGetCount(devices);
-    printf("MTDeviceCreateList returned %ld device(s)\n", count);
-
     if (trackAllDevices) {
         printf("Tracking all multitouch devices\n");
-
-        for (CFIndex i = 0; i < count; i++) {
-            MTDeviceRef device = (MTDeviceRef)CFArrayGetValueAtIndex(devices, i);
-            addTrackedDevice(device, isBuiltIn, getService);
-        }
     } else {
-        for (CFIndex i = 0; i < count; i++) {
-            MTDeviceRef device = (MTDeviceRef)CFArrayGetValueAtIndex(devices, i);
-
-            if (!isBuiltIn(device)) {
-                continue;
-            }
-
-            addTrackedDevice(device, isBuiltIn, getService);
-            break;
-        }
-
-        if (trackedDeviceCount == 0 && count > 0) {
-            printf("No built-in device found; falling back to first multitouch device\n");
-            MTDeviceRef device = (MTDeviceRef)CFArrayGetValueAtIndex(devices, 0);
-            addTrackedDevice(device, isBuiltIn, getService);
-        }
+        printf("Tracking built-in multitouch device\n");
     }
+
+    scanForDevices();
 
     if (trackedDeviceCount == 0) {
         fprintf(stderr, "No multitouch device available yet; continuing to poll\n");
     }
 
-    for (int i = 0; i < trackedDeviceCount; i++) {
-        printf("Tracking device: \"%s\"\n", trackedDevices[i].name);
-        registerCallback(trackedDevices[i].device, contactFrameCallback);
-
-        trackedDevices[i].startStatus = start(trackedDevices[i].device, 0);
-        printf("MTDeviceStart device=\"%s\" status=%d\n", trackedDevices[i].name, trackedDevices[i].startStatus);
-
-        if (trackedDevices[i].startStatus != 0) {
-            fprintf(stderr, "MTDeviceStart failed for \"%s\". Run this helper with sudo.\n", trackedDevices[i].name);
-        }
-    }
-
     fflush(stdout);
 
     while (isRunning) {
-        CFArrayRef latestDevices = createList();
-
-        if (latestDevices) {
-            CFIndex latestCount = CFArrayGetCount(latestDevices);
-
-            for (CFIndex i = 0; i < latestCount; i++) {
-                MTDeviceRef device = (MTDeviceRef)CFArrayGetValueAtIndex(latestDevices, i);
-
-                if (!trackAllDevices && !isBuiltIn(device)) {
-                    continue;
-                }
-
-                if (addTrackedDevice(device, isBuiltIn, getService)) {
-                    startTrackedDeviceAtIndex(trackedDeviceCount - 1);
-                }
-            }
-
-            CFRelease(latestDevices);
+        if (resetRequested) {
+            resetRequested = 0;
+            resetTrackedDevices();
+        } else {
+            scanForDevices();
         }
 
         sleep(1);
@@ -653,7 +686,6 @@ int main(int argc, char *argv[]) {
     clientCount = 0;
     pthread_mutex_unlock(&clientMutex);
 
-    CFRelease(devices);
     dlclose(handle);
 
     return 0;

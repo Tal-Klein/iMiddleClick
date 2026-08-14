@@ -5,6 +5,7 @@
 //  Created by Tal Klein on 11/08/2026.
 //
 
+import AppKit
 import Foundation
 import Network
 import ServiceManagement
@@ -13,14 +14,57 @@ final class GlobalTouchMonitor {
 
     private let helperService = MultitouchHelperService()
     private let client = MultitouchHelperClient()
+    private var lifecycleObservers: [NSObjectProtocol] = []
 
     func start() {
         helperService.registerIfNeeded()
         client.start()
+        installLifecycleObservers()
     }
 
     func stop() {
+        removeLifecycleObservers()
         client.stop()
+    }
+
+    private func installLifecycleObservers() {
+        guard lifecycleObservers.isEmpty else {
+            return
+        }
+
+        let workspaceNotifications = NSWorkspace.shared.notificationCenter
+
+        for notificationName in [
+            NSWorkspace.sessionDidBecomeActiveNotification,
+            NSWorkspace.screensDidWakeNotification,
+            NSWorkspace.didWakeNotification
+        ] {
+            let observer = workspaceNotifications.addObserver(
+                forName: notificationName,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                self?.resetHelperAfterLifecycleEvent(notification.name.rawValue)
+            }
+
+            lifecycleObservers.append(observer)
+        }
+    }
+
+    private func removeLifecycleObservers() {
+        let workspaceNotifications = NSWorkspace.shared.notificationCenter
+
+        for observer in lifecycleObservers {
+            workspaceNotifications.removeObserver(observer)
+        }
+
+        lifecycleObservers.removeAll()
+    }
+
+    private func resetHelperAfterLifecycleEvent(_ reason: String) {
+        GestureDiagnostics.log("[MT] requesting helper reset after \(reason)")
+        helperService.registerIfNeeded()
+        client.resetHelper(reason: reason)
     }
 }
 
@@ -28,7 +72,7 @@ private final class MultitouchHelperService {
 
     private let service = SMAppService.daemon(plistName: "com.talklein.middleclick.multitouch-helper.plist")
     private let registrationVersionKey = "multitouchHelperRegistrationVersion"
-    private let currentRegistrationVersion = 5
+    private let currentRegistrationVersion = 6
 
     func registerIfNeeded() {
         refreshStoredStatus()
@@ -112,6 +156,8 @@ private final class MultitouchHelperClient {
     private var receiveBuffer = ""
     private var deviceStates: [String: DeviceTouchState] = [:]
     private var isStopped = false
+    private var isConnectionReady = false
+    private var pendingHelperResetReason: String?
 
     private struct DevicePoint {
         var x: Double
@@ -166,7 +212,22 @@ private final class MultitouchHelperClient {
             reconnectWorkItem = nil
             connection?.cancel()
             connection = nil
+            isConnectionReady = false
             resetTouchState()
+        }
+    }
+
+    func resetHelper(reason: String) {
+        queue.async { [weak self] in
+            guard let self else {
+                return
+            }
+
+            pendingHelperResetReason = reason
+
+            if isConnectionReady {
+                sendPendingHelperReset()
+            }
         }
     }
 
@@ -189,11 +250,15 @@ private final class MultitouchHelperClient {
     private func handleConnectionState(_ state: NWConnection.State) {
         switch state {
         case .ready:
+            isConnectionReady = true
             UserDefaults.standard.set(true, forKey: MiddleClickSettings.Keys.helperConnected)
             UserDefaults.standard.set("Helper Running", forKey: MiddleClickSettings.Keys.helperServiceStatus)
             print("Connected to multitouch root helper")
+            pendingHelperResetReason = pendingHelperResetReason ?? "connection ready"
+            sendPendingHelperReset()
 
         case .failed(let error):
+            isConnectionReady = false
             UserDefaults.standard.set(false, forKey: MiddleClickSettings.Keys.helperConnected)
             UserDefaults.standard.set("Helper Not Running", forKey: MiddleClickSettings.Keys.helperServiceStatus)
             print("Multitouch helper connection failed: \(error)")
@@ -203,6 +268,7 @@ private final class MultitouchHelperClient {
             scheduleReconnect()
 
         case .cancelled:
+            isConnectionReady = false
             UserDefaults.standard.set(false, forKey: MiddleClickSettings.Keys.helperConnected)
             UserDefaults.standard.set("Helper Not Running", forKey: MiddleClickSettings.Keys.helperServiceStatus)
             connection = nil
@@ -215,6 +281,24 @@ private final class MultitouchHelperClient {
         default:
             break
         }
+    }
+
+    private func sendPendingHelperReset() {
+        guard let connection, let reason = pendingHelperResetReason else {
+            return
+        }
+
+        pendingHelperResetReason = nil
+        let command = "reset \(reason)\n"
+        let data = Data(command.utf8)
+
+        connection.send(content: data, completion: .contentProcessed { error in
+            if let error {
+                print("Could not request multitouch helper reset: \(error)")
+            } else {
+                GestureDiagnostics.log("[MT] requested helper reset: \(reason)")
+            }
+        })
     }
 
     private func receive(on connection: NWConnection) {
