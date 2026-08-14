@@ -87,6 +87,7 @@ static volatile sig_atomic_t isRunning = 1;
 
 static MTRegisterContactFrameCallbackFn gRegisterCallback = NULL;
 static MTDeviceStartFn gStart = NULL;
+static MTDeviceStopFn gStop = NULL;
 
 static bool containsCaseInsensitive(const char *text, const char *needle) {
     if (!text || !needle || !needle[0]) {
@@ -440,14 +441,14 @@ static void *loadSymbol(void *handle, const char *name) {
     return symbol;
 }
 
-static bool isTrackedDevice(MTDeviceRef device, io_service_t service) {
+static int trackedDeviceIndex(MTDeviceRef device, io_service_t service) {
     for (int i = 0; i < trackedDeviceCount; i++) {
         if (trackedDevices[i].device == device || (service != IO_OBJECT_NULL && trackedDevices[i].service == service)) {
-            return true;
+            return i;
         }
     }
 
-    return false;
+    return -1;
 }
 
 static void startTrackedDeviceAtIndex(int index) {
@@ -473,7 +474,25 @@ static bool addTrackedDevice(MTDeviceRef device, MTDeviceIsBuiltInFn isBuiltIn, 
 
     io_service_t service = getService(device);
 
-    if (isTrackedDevice(device, service)) {
+    int existingIndex = trackedDeviceIndex(device, service);
+
+    if (existingIndex >= 0) {
+        if (trackedDevices[existingIndex].device != device) {
+            printf("Refreshing device registration: \"%s\"\n", trackedDevices[existingIndex].name);
+
+            if (gStop && trackedDevices[existingIndex].startStatus == 0) {
+                gStop(trackedDevices[existingIndex].device);
+            }
+
+            trackedDevices[existingIndex].device = device;
+            trackedDevices[existingIndex].service = service;
+            trackedDevices[existingIndex].lastFingerCount = 0;
+            trackedDevices[existingIndex].lastX = 0.0f;
+            trackedDevices[existingIndex].lastY = 0.0f;
+            trackedDevices[existingIndex].startStatus = -1;
+            startTrackedDeviceAtIndex(existingIndex);
+        }
+
         return false;
     }
 
@@ -538,6 +557,7 @@ int main(int argc, char *argv[]) {
     MTDeviceStopFn stop = (MTDeviceStopFn)loadSymbol(handle, "MTDeviceStop");
     gRegisterCallback = registerCallback;
     gStart = start;
+    gStop = stop;
 
     CFArrayRef devices = createList();
 

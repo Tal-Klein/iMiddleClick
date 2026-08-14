@@ -28,7 +28,7 @@ private final class MultitouchHelperService {
 
     private let service = SMAppService.daemon(plistName: "com.talklein.middleclick.multitouch-helper.plist")
     private let registrationVersionKey = "multitouchHelperRegistrationVersion"
-    private let currentRegistrationVersion = 4
+    private let currentRegistrationVersion = 5
 
     func registerIfNeeded() {
         refreshStoredStatus()
