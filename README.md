@@ -5,15 +5,15 @@
 <p align="center">iMiddleClick</p>
 
 <h2 align="center">
-  Middle-click gestures for MacBook trackpads and Magic Mouse.
+  Middle-click gestures for MacBook Magic Mouse and trackpad.
 </h2>
 
 <table>
   <tr>
     <td width="40%" align="center">
-      <img src="assets/app view.png" width="100%">
+      <img src="assets/demo_mouse.gif" width="100%">
     </td>
-    <td width="60%" align="center">
+    <td width="40%" align="center">
       <img src="assets/demo.gif" width="100%">
     </td>
   </tr>
@@ -21,19 +21,19 @@
 
 ## Features
 
-### MacBook Trackpad
-
-- Three-finger tap → Middle Click
-- Three-finger physical click → Middle Click
-- Supports the natural `2 → 3 → 2` gesture:
-  keep two fingers resting on the trackpad and briefly tap with a third finger
-
 ### Magic Mouse
 
 - Configurable 2-finger or 3-finger gestures
 - Tap → Middle Click
 - Physical click → Middle Click
 - Tap and physical-click gestures can be enabled independently
+
+### MacBook Trackpad
+
+- Three-finger tap → Middle Click
+- Three-finger physical click → Middle Click
+- Supports the natural `2 → 3 → 2` gesture:
+  keep two fingers resting on the trackpad and briefly tap with a third finger
 
 ### Other
 
