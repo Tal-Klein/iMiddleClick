@@ -17,6 +17,10 @@ final class GlobalTouchMonitor {
     private var lifecycleObservers: [NSObjectProtocol] = []
 
     func start() {
+        client.onHelperUnresponsive = { [weak self] reason in
+            self?.helperService.restartIfPossible(reason: reason)
+        }
+
         helperService.registerIfNeeded()
         client.start()
         installLifecycleObservers()
@@ -72,7 +76,8 @@ private final class MultitouchHelperService {
 
     private let service = SMAppService.daemon(plistName: "com.talklein.middleclick.multitouch-helper.plist")
     private let registrationVersionKey = "multitouchHelperRegistrationVersion"
-    private let currentRegistrationVersion = 6
+    private let currentRegistrationVersion = 7
+    private var lastRestartAttempt = Date.distantPast
 
     func registerIfNeeded() {
         refreshStoredStatus()
@@ -94,6 +99,26 @@ private final class MultitouchHelperService {
             UserDefaults.standard.set("Helper Status Unknown", forKey: MiddleClickSettings.Keys.helperServiceStatus)
             print("Unknown multitouch launch daemon status: \(service.status)")
         }
+    }
+
+    func restartIfPossible(reason: String) {
+        let now = Date()
+
+        guard now.timeIntervalSince(lastRestartAttempt) > 15 else {
+            return
+        }
+
+        lastRestartAttempt = now
+        UserDefaults.standard.set("Restarting Helper", forKey: MiddleClickSettings.Keys.helperServiceStatus)
+        print("Restarting multitouch launch daemon after unresponsive helper: \(reason)")
+
+        do {
+            try service.unregister()
+        } catch {
+            print("Could not unregister unresponsive multitouch launch daemon: \(error)")
+        }
+
+        register()
     }
 
     private func refreshRegistrationIfNeeded() {
@@ -147,17 +172,24 @@ private final class MultitouchHelperService {
 
 private final class MultitouchHelperClient {
 
+    var onHelperUnresponsive: ((String) -> Void)?
+
     private let queue = DispatchQueue(label: "MultitouchHelperClient")
     private let host = NWEndpoint.Host("127.0.0.1")
     private let port = NWEndpoint.Port(rawValue: 47654)!
+    private let healthCheckInterval: TimeInterval = 10
+    private let helperResponseTimeout: TimeInterval = 25
 
     private var connection: NWConnection?
     private var reconnectWorkItem: DispatchWorkItem?
+    private var healthCheckWorkItem: DispatchWorkItem?
     private var receiveBuffer = ""
     private var deviceStates: [String: DeviceTouchState] = [:]
     private var isStopped = false
     private var isConnectionReady = false
     private var pendingHelperResetReason: String?
+    private var lastPongAt = Date()
+    private var pingInFlight = false
 
     private struct DevicePoint {
         var x: Double
@@ -210,6 +242,8 @@ private final class MultitouchHelperClient {
             isStopped = true
             reconnectWorkItem?.cancel()
             reconnectWorkItem = nil
+            healthCheckWorkItem?.cancel()
+            healthCheckWorkItem = nil
             connection?.cancel()
             connection = nil
             isConnectionReady = false
@@ -251,14 +285,20 @@ private final class MultitouchHelperClient {
         switch state {
         case .ready:
             isConnectionReady = true
+            lastPongAt = Date()
+            pingInFlight = false
             UserDefaults.standard.set(true, forKey: MiddleClickSettings.Keys.helperConnected)
             UserDefaults.standard.set("Helper Running", forKey: MiddleClickSettings.Keys.helperServiceStatus)
             print("Connected to multitouch root helper")
             pendingHelperResetReason = pendingHelperResetReason ?? "connection ready"
             sendPendingHelperReset()
+            scheduleHealthCheck()
 
         case .failed(let error):
             isConnectionReady = false
+            pingInFlight = false
+            healthCheckWorkItem?.cancel()
+            healthCheckWorkItem = nil
             UserDefaults.standard.set(false, forKey: MiddleClickSettings.Keys.helperConnected)
             UserDefaults.standard.set("Helper Not Running", forKey: MiddleClickSettings.Keys.helperServiceStatus)
             print("Multitouch helper connection failed: \(error)")
@@ -269,6 +309,9 @@ private final class MultitouchHelperClient {
 
         case .cancelled:
             isConnectionReady = false
+            pingInFlight = false
+            healthCheckWorkItem?.cancel()
+            healthCheckWorkItem = nil
             UserDefaults.standard.set(false, forKey: MiddleClickSettings.Keys.helperConnected)
             UserDefaults.standard.set("Helper Not Running", forKey: MiddleClickSettings.Keys.helperServiceStatus)
             connection = nil
@@ -283,22 +326,87 @@ private final class MultitouchHelperClient {
         }
     }
 
+    private func scheduleHealthCheck() {
+        healthCheckWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.performHealthCheck()
+        }
+
+        healthCheckWorkItem = workItem
+        queue.asyncAfter(deadline: .now() + healthCheckInterval, execute: workItem)
+    }
+
+    private func performHealthCheck() {
+        guard isStopped == false, isConnectionReady else {
+            return
+        }
+
+        let elapsed = Date().timeIntervalSince(lastPongAt)
+
+        if pingInFlight, elapsed > helperResponseTimeout {
+            handleUnresponsiveHelper(reason: "no pong for \(Int(elapsed))s")
+            return
+        }
+
+        sendCommand("ping\n") { [weak self] error in
+            guard let self else {
+                return
+            }
+
+            self.queue.async {
+                if let error {
+                    self.handleUnresponsiveHelper(reason: "ping send failed: \(error)")
+                } else {
+                    self.pingInFlight = true
+                    self.scheduleHealthCheck()
+                }
+            }
+        }
+    }
+
+    private func handleUnresponsiveHelper(reason: String) {
+        print("Multitouch helper unresponsive: \(reason)")
+        UserDefaults.standard.set(false, forKey: MiddleClickSettings.Keys.helperConnected)
+        UserDefaults.standard.set("Helper Unresponsive", forKey: MiddleClickSettings.Keys.helperServiceStatus)
+        isConnectionReady = false
+        pingInFlight = false
+        healthCheckWorkItem?.cancel()
+        healthCheckWorkItem = nil
+        connection?.cancel()
+        connection = nil
+        resetTouchState()
+
+        DispatchQueue.main.async { [onHelperUnresponsive] in
+            onHelperUnresponsive?(reason)
+        }
+
+        scheduleReconnect()
+    }
+
     private func sendPendingHelperReset() {
-        guard let connection, let reason = pendingHelperResetReason else {
+        guard let reason = pendingHelperResetReason else {
             return
         }
 
         pendingHelperResetReason = nil
         let command = "reset \(reason)\n"
-        let data = Data(command.utf8)
-
-        connection.send(content: data, completion: .contentProcessed { error in
+        sendCommand(command) { error in
             if let error {
                 print("Could not request multitouch helper reset: \(error)")
             } else {
                 GestureDiagnostics.log("[MT] requested helper reset: \(reason)")
             }
-        })
+        }
+    }
+
+    private func sendCommand(_ command: String, completion: @escaping (NWError?) -> Void) {
+        guard let connection else {
+            completion(NWError.posix(.ENOTCONN))
+            return
+        }
+
+        connection.send(content: Data(command.utf8), completion: .contentProcessed(completion))
     }
 
     private func receive(on connection: NWConnection) {
@@ -340,6 +448,13 @@ private final class MultitouchHelperClient {
     }
 
     private func handleLine(_ line: String) {
+        if line == "pong" {
+            lastPongAt = Date()
+            pingInFlight = false
+            GestureDiagnostics.log("[MT] helper pong")
+            return
+        }
+
         if line.hasPrefix("deviceFingerCount=") {
             handleDeviceFingerCountLine(line)
             return

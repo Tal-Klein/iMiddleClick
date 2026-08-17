@@ -159,6 +159,10 @@ static void *clientCommandThreadMain(void *context) {
         if (strstr(buffer, "reset")) {
             resetRequested = 1;
         }
+
+        if (strstr(buffer, "ping")) {
+            send(clientSocket, "pong\n", 5, MSG_NOSIGNAL);
+        }
     }
 
     return NULL;
